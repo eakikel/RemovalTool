@@ -1,10 +1,17 @@
-from confluent_kafka import Consumer, KafkaException, KafkaError
+  , KafkaException, KafkaError
 from xml.etree import ElementTree as ET
 import json
+import threading
 import logging
 from logging.handlers import RotatingFileHandler
+import keyring
 import cucm
 import cuc
+
+# Create heartbeat message every 60 seconds
+def heartbeat():
+    logger.info('<<<Heartbeat>>>')
+    threading.Timer(60, heartbeat).start()
 
 if __name__ == '__main__':
 
@@ -27,17 +34,20 @@ if __name__ == '__main__':
         kafka_security = settings_json['kafka_security']
         kafka_mechanism = settings_json['kafka_mechanism']
         kafka_user = settings_json['kafka_user']
-        kafka_pw = settings_json['kafka_pw']
+        kafka_pw = keyring.get_password("Kafka",kafka_user)
 
     # Set up Kafka consumer configuration
-    config = {'bootstrap.servers': kafka_broker, 'group.id': kafka_group, 'session.timeout.ms': 10000,
+    config = {'bootstrap.servers' : kafka_broker, 'group.id' : kafka_group, 'session.timeout.ms' : 60000,
             'auto.offset.reset': 'latest', 'security.protocol' : kafka_security,
-            'sasl.mechanism' : kafka_mechanism, 'sasl.username': kafka_user,
-            'sasl.password': kafka_pw, 'enable.auto.commit': True}
+            'sasl.mechanism' : kafka_mechanism, 'sasl.username': kafka_user, 'sasl.password' : kafka_pw,
+            'enable.auto.commit' : True, 'socket.keepalive.enable' : True, 'log.connection.close' : True}
 
     # Create Consumer instance and subscribe to topic
     c = Consumer(config)
     c.subscribe(kafka_topics)
+
+    # Run heartbeat thread
+    heartbeat()
 
     # Create infinate loop to constantly read messages from Kafka
     try:
@@ -66,30 +76,30 @@ if __name__ == '__main__':
                 # Invalid XML format
                 except:
                     logger.error('XML format error in Kafka message %s' % (msg.value().decode()))
-                else:
-                    # Find message "event type"
-                    try:
-                        event_type = change_event.find('eventType').text
-                    # Invalid "event type"
-                    except:
-                        logger.error('EventType attribute not found in Kafka message %s' % (msg.value().decode()))
+            else:
+                # Find message "event type"
+                try:
+                    event_type = change_event.find('eventType').text
+                # Invalid "event type"
+                except:
+                    logger.error('EventType attribute not found in Kafka message %s' % (msg.value().decode()))
+            else:
+                # Find message "personGuid"
+                try:
+                    person_guid = change_event.find('personGuid').text
+                # Invalid "personGuid"
+                except:
+                    logger.error('PersonGUID attribute Not Found in Kafka message %s' % (msg.value().decode()))
+            else:
+                # If "event type" is "DISABLE", call CUCM and CUC functions
+                if event_type == 'DISABLE':
+                    logger.info('Successfully received DISABLE message for personGUID %s' % (person_guid))
+                    user_id = cucm.axl_call(person_guid)
+                    if user_id:
+                        cuc.rest_call(user_id)
                     else:
-                        # Find message "personGuid"
-                        try:
-                            person_guid = change_event.find('personGuid').text
-                        # Invalid "personGuid"
-                        except:
-                            logger.error('PersonGUID attribute Not Found in Kafka message %s' % (msg.value().decode()))
-                        else:
-                            # If "event type" is "DISABLE", call CUCM and CUC functions
-                            if event_type == 'DISABLE':
-                                logger.info('Successfully received DISABLE message for personGUID %s' % (person_guid))
-                                user_id = cucm.axl_call(person_guid)
-                                if user_id:
-                                    cuc.rest_call(user_id)
-                                else:
-                                    logger.error('DISABLE message for personGUID %s not processed due to errors' % (person_guid))
-    except KeyboardInterrupt:
+                        logger.info('DISABLE message for personGUID %s not processed due to user not found' % (person_guid))
+except KeyboardInterrupt:
         logger.info('Aborted from keyboard')
 
     finally:
